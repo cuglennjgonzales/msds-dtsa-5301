@@ -1,0 +1,476 @@
+---
+title: "Covid19 Data Analysis"
+date: '2022-04-13'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+```
+
+### Introduction
+
+This is a quick analysis and visualization of Covid19 data taken from the John Hopkins github as in the lectures, with period ranging from Jan 2020 up to Apr 2022. We will look at a few interesting features and how they relate to one another and to the rates of Covid19 cases and deaths.
+
+#### Extract Time Series Data
+
+We'll retrieve the data as in the lectures.
+
+Reference: <https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series>
+
+```{r get_jhu_data}
+# break the url down to fit in pdf render
+main_repo <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master'
+time_series_data_path <- '/csse_covid_19_data/csse_covid_19_time_series/'
+base_url <- paste(main_repo, time_series_data_path, sep='') 
+
+file_names <- c(
+  "time_series_covid19_confirmed_global.csv", 
+  "time_series_covid19_deaths_global.csv", 
+  "time_series_covid19_confirmed_US.csv", 
+  "time_series_covid19_deaths_US.csv"
+)
+
+urls <- str_c(base_url, file_names)
+
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+us_cases <- read_csv(urls[3])
+us_deaths <- read_csv(urls[4])
+```
+
+#### Initial Inspection
+
+Let's see what the data looks like.
+
+```{r head_global_cases}
+head(global_cases)
+```
+
+The data is laid out with one country per row, with the dates as columns. _Province/State_, _Lat_, and _Long_ are also columns. This schema applies to `global_deaths`, `us_cases`, and `us_deaths` as well. For our analysis, we want `date` to be a feature and the data points (cases, deaths) to be instances so we'll proceed with transformations as done in the lectures.
+
+```{r length_date_cols}
+length(names(global_cases))
+```
+
+We have more than 800 date readings.
+
+#### Data Cleaning
+
+We'll tidy up as in the lectures. First, we convert the date columns into rows so we have cases and deaths for each row.
+
+```{r tidying_up, echo=TRUE}
+global_cases <- global_cases %>%
+  pivot_longer(
+    cols = -c('Province/State', 'Country/Region', Lat, Long),
+    names_to = 'date',
+    values_to = 'cases'
+  ) %>%
+  select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer(
+    cols = -c('Province/State', 'Country/Region', Lat, Long),
+    names_to = 'date',
+    values_to = 'deaths'
+  ) %>%
+  select(-c(Lat, Long))
+
+us_cases <- us_cases %>% 
+  pivot_longer(
+    cols = -(UID:Combined_Key), 
+    names_to = 'date', 
+    values_to = 'cases'
+  ) %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+us_deaths <- us_deaths %>%
+  pivot_longer(
+    cols = -(UID:Population), 
+    names_to = 'date', 
+    values_to = 'deaths'
+  ) %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+```
+
+#### Transformation
+
+Transformation is also done as in the lectures, but we'll explicitly sort by country and date.
+
+Here let's join the cases and deaths data, and select only nonzero values. We'll also rename some columns so they're easier to refer to.
+
+```{r transform_join_cd, echo=TRUE}
+global <- 
+  global_cases %>%
+  full_join(global_deaths) %>%
+  rename(Country_Region = 'Country/Region', Province_State = 'Province/State') %>%
+  mutate(date = mdy(date)) %>%
+  arrange(Country_Region, date)
+
+us <- us_cases %>% 
+  full_join(us_deaths) %>%
+  arrange(Province_State, date)
+```
+
+For global data, we also add a `Population` column by joining with an additional dataset: the `UID ISO FIPS Lookup Table` (reference: <https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv>). Then we create a populations table per country.
+
+```{r transform_add_pop}
+uid_path <- '/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv'
+uid_lookup_url <- paste(main_repo, uid_path, sep='')
+uid <- read_csv(uid_lookup_url)
+
+global <- global %>%
+  left_join(uid, by = c('Province_State', 'Country_Region')) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+populations <- uid %>% 
+  filter(is.na(Province_State)) %>%
+  select(c(Country_Region, Population, Lat, Long_))
+```
+
+#### Transformation
+
+For each country, we'll now add the following:
+
+* Total new cases and deaths per week
+* New cases and deaths lagged by two weeks
+* Population per country
+* Weekly cases and deaths per thousand population
+* Weekly lagged cases and deaths per thousand population
+
+```{r transform__total_weekly__lag_two_weeks__per_thousand_pop}
+# weekly total cases/deaths, weekly cases/deaths with 2-week lag,
+global <- global %>% 
+  group_by(Country_Region, date) %>% summarize(cases=sum(cases), deaths=sum(deaths)) %>%
+  mutate(YearWeek=round_date(date, 'week')) %>% 
+  filter(cases > 0) %>% 
+  group_by(Country_Region) %>% 
+  mutate(
+    new_daily_cases= cases - lag(cases, default=0), 
+    new_daily_deaths= deaths - lag(deaths, default=0),
+    new_cases_two_week_lag= cases - lag(cases, n=14, default=0), 
+    new_deaths_two_week_lag= deaths - lag(deaths, n=14, default=0)
+  ) %>% 
+  group_by(Country_Region, YearWeek) %>% 
+  summarize(
+    weekly_new_cases=sum(new_daily_cases), 
+    weekly_new_deaths=sum(new_daily_deaths),
+    weekly_new_cases_lagged=sum(new_cases_two_week_lag),
+    weekly_new_deaths_lagged=sum(new_deaths_two_week_lag),
+  ) %>%
+  ungroup() %>%
+  left_join(populations, by=c('Country_Region')) %>%
+  mutate(
+    cases_k=  1000 * weekly_new_cases / Population,
+    deaths_k=  1000 * weekly_new_deaths / Population,
+    cases_lagged_k=  1000 * weekly_new_cases_lagged / Population,
+    deaths_lagged_k=  1000 * weekly_new_deaths_lagged / Population
+  )
+```
+
+We'll also create a dataframe with the same features for the world as a whole:
+
+```{r world_data}
+world_pop <- sum(populations$Population, na.rm=TRUE)
+
+world <- global %>% 
+  group_by(YearWeek) %>%
+  summarize(
+    weekly_new_cases=sum(weekly_new_cases), 
+    weekly_new_deaths=sum(weekly_new_deaths),
+    weekly_new_cases_lagged=sum(weekly_new_cases_lagged),
+    weekly_new_deaths_lagged=sum(weekly_new_deaths_lagged),
+  ) %>% 
+  mutate(
+    cases_k=  1000 * weekly_new_cases / world_pop,
+    deaths_k=  1000 * weekly_new_deaths / world_pop,
+    cases_lagged_k=  1000 * weekly_new_cases_lagged / world_pop,
+    deaths_lagged_k=  1000 * weekly_new_deaths_lagged / world_pop
+  )
+```
+
+Let's also define a few geopolitical groupings that we may use later for our analysis and visualizations.
+
+```{r geopolitical}
+g7_countries <- c(
+  'Canada', 'France', 'Germany', 'Italy', 'Japan', 'United Kingdom', 'US'
+)
+eu_countries <- c(
+  'Austria','Belgium','Bulgaria','Croatia','Cyprus','Czech Republic',
+  'Denmark','Estonia','Finland','France','Germany','Greece','Hungary',
+  'Ireland','Italy','Latvia','Lithuania','Luxembourg','Malta','Netherlands',
+  'Poland','Portugal','Romania','Slovakia','Slovenia','Spain','Sweden'
+)
+sea_countries <- c(
+  'Brunei', 'Cambodia', 'Indonesia', 'Laos', 'Malaysia', 'Burma',
+  'Philippines', 'Singapore', 'Thailand', 'Timor-Leste', 'Vietnam'
+)
+ea_countries <- c(
+  'China', 'Japan', 'Mongolia', 'Korea, South', 'Taiwan'
+)
+sa_countries <- c(
+  'Afghanistan', 'Bangladesh', 'Bhutan', 'India', 'Maldives', 'Nepal',
+  'Pakistan', 'Sri Lanka'
+)
+ca_countries <- c(
+  'Kazakhstan', 'Kyrgyzstan', 'Tajikistan', 'Turkmenistan', 'Uzbekistan'
+)
+wa_countries <- c(
+  'Armenia', 'Azerbaijan', 'Bahrain', 'Cyprus', 'Georgia', 'Iran', 'Iraq', 
+  'Israel', 'Jordan', 'Kuwait', 'Lebanon', 'Oman', 'Palestine', 'Qatar', 
+  'Saudi Arabia', 'Syria', 'Turkey', 'United Arab Emirates', 'Yemen'
+)
+```
+
+Let's create a few dataframes based on geopolitical membership:
+
+```{r transform_geopolitical_membership}
+get_population <- function(countries) {
+  sum((populations %>% filter(Country_Region %in% countries))$Population, na.rm=TRUE)
+}
+
+consolidate <- function(df, n_population) {
+  df %>% 
+  group_by(YearWeek) %>%
+  summarize(
+    weekly_new_cases=sum(weekly_new_cases), 
+    weekly_new_deaths=sum(weekly_new_deaths),
+    weekly_new_cases_lagged=sum(weekly_new_cases_lagged),
+    weekly_new_deaths_lagged=sum(weekly_new_deaths_lagged),
+  ) %>% 
+  mutate(
+    cases_k=  1000 * weekly_new_cases / n_population,
+    deaths_k=  1000 * weekly_new_deaths / n_population,
+    cases_lagged_k=  1000 * weekly_new_cases_lagged / n_population,
+    deaths_lagged_k=  1000 * weekly_new_deaths_lagged / n_population
+  )
+}
+
+eu <- consolidate(  # 'European Union'
+  global %>% filter(Country_Region %in% eu_countries), get_population(eu_countries)
+)
+g7 <- consolidate( # 'G7'
+  global %>% filter(Country_Region %in% g7_countries), get_population(g7_countries)
+)
+sea <- consolidate( # 'Southeast Asia'
+  global %>% filter(Country_Region %in% sea_countries), get_population(sea_countries)
+)
+ea <- consolidate( # 'East Asia'
+  global %>% filter(Country_Region %in% ea_countries), get_population(ea_countries)
+)
+sa <- consolidate( # 'South Asia'
+  global %>% filter(Country_Region %in% sa_countries), get_population(sa_countries)
+)
+ca <- consolidate( # 'Central Asia'
+  global %>% filter(Country_Region %in% ca_countries), get_population(ca_countries)
+)
+wa <- consolidate( # 'West Asia'
+  global %>% filter(Country_Region %in% wa_countries), get_population(wa_countries)
+)
+```
+
+#### Visualization
+
+How have countries in Asia fared during the pandemic? Let's compare the Asian regions by the number of cases per thousand population, looking more closely at Southeast Asia.
+
+Here are some general settings for our visualizations:
+
+```{r visualization_options}
+transparency <- 0.3
+thickness <- 1
+base_theme <- theme(
+  plot.title=element_text(hjust=0.5, size=12),
+  legend.position='bottom', 
+  legend.box='vertical', 
+  legend.text=element_text(size=7), 
+  legend.title=element_text(size=10), 
+  axis.title.x=element_text(size=10)
+)
+```
+
+Let's add world cases data for comparison:
+
+```{r visualization_cases_k_asia}
+ggplot() +
+  ggtitle('Weekly Cases per Thousand Population') + 
+  geom_line(
+    data=sea, 
+    aes(x=YearWeek, y=cases_k, color='Southeast'), 
+    alpha=0.8, 
+    size=thickness
+  ) +
+  geom_line(
+    data=ea, 
+    aes(x=YearWeek, y=cases_k, color='East'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=sa, 
+    aes(x=YearWeek, y=cases_k, color='South'), 
+    alpha=transparency, size=thickness
+  ) +
+  geom_line(
+    data=ca, 
+    aes(x=YearWeek, y=cases_k, color='Central'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=wa, 
+    aes(x=YearWeek, y=cases_k, color='West'), 
+    alpha=transparency, size=thickness
+  ) +
+  geom_line(
+    data=world, 
+    aes(x=YearWeek, y=cases_k, color='World'), 
+    alpha=0.8, size=thickness
+  ) +
+  theme_minimal() +
+  base_theme +
+  labs(x='Year-Week', y="Cases", color='Asia')
+```
+
+We can see that there was a dramatic increase in cases across all regions at the start of the year, most likely due to the omicron variant. The cases eventually decreased as well and are now at a level that has been among the lowest during the entire pandemic -- and this applies to virtually all regions.
+
+And for deaths:
+
+```{r visualization_deaths_k_asia}
+ggplot() +
+  ggtitle('Weekly Deaths per Thousand Population') + 
+  geom_line(
+    data=sea, 
+    aes(x=YearWeek, y=deaths_k, color='Southeast'), 
+    alpha=0.8, 
+    size=thickness
+  ) +
+  geom_line(
+    data=ea, 
+    aes(x=YearWeek, y=deaths_k, color='East'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=sa, 
+    aes(x=YearWeek, y=deaths_k, color='South'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=ca, 
+    aes(x=YearWeek, y=deaths_k, color='Central'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=wa, 
+    aes(x=YearWeek, y=deaths_k, color='West'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_line(
+    data=world, 
+    aes(x=YearWeek, y=deaths_k, color='World'), 
+    alpha=0.8, 
+    size=thickness
+  ) +
+  theme_minimal() +
+  base_theme +
+  labs(x='Year-Week', y="Deaths", color='Asia')
+```
+
+#### Model
+
+Let's create a linear model that can tell us (very roughly) if we are on a downward or upward trend.
+
+```{r model_lm}
+predict_cases_k_from_past_year <- function(df) {
+  df_past_yr <- df %>% filter(YearWeek >= '2021-01-01')
+  model <- lm(cases_k ~ YearWeek, data=df_past_yr)
+  df_past_yr %>% mutate(cases_k_pred=predict(model))
+}
+
+ea_cases_k_pred <- predict_cases_k_from_past_year(ea)
+sea_cases_k_pred <- predict_cases_k_from_past_year(sea)
+eu_cases_k_pred <- predict_cases_k_from_past_year(eu)
+world_cases_k_pred <- predict_cases_k_from_past_year(world)
+```
+
+Let's visualize our predictions:
+
+```{r visualize_model_preds}
+ggplot() + 
+  ggtitle('Linear Trend of Cases per Thousand') + 
+  geom_line(
+    data=sea_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k, color='Southeast'), 
+    alpha=transparency, 
+    size=thickness
+  ) + 
+  geom_point(
+    data=ea_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k_pred, color='East (Predicted)'), 
+    alpha=0.8, 
+    size=thickness
+  ) + 
+  geom_line(
+    data=ea_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k, color='East'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_point(
+    data=eu_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k_pred, color='EU (Predicted)'), 
+    alpha=0.8, 
+    size=thickness
+  ) + 
+  geom_line(
+    data=eu_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k, color='EU'), 
+    alpha=transparency, 
+    size=thickness
+  ) +
+  geom_point(
+    data=world_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k_pred, color='World (Predicted)'), 
+    alpha=0.8, 
+    size=thickness
+  ) +
+  geom_line(
+    data=sea_cases_k_pred, 
+    aes(x=YearWeek, y=cases_k_pred, color='Southeast (Predicted)'), 
+    alpha=0.8, 
+    size=thickness
+  ) + 
+  theme_minimal() +
+  base_theme +
+  labs(x='Year-Week', y="Cases", color='Asia')
+```
+
+#### Conclusion
+
+The rates for both cases and deaths per thousand have declined recently, and these have been shown in our visualizations. Using our (very rough) linear trend predictor, increases in new cases in Asia will be markedly lower than in other regions like the EU. New cases in Asia are comparable with data for the world as a whole.
+
+#### Bias Analysis
+
+External sources of bias include the bias of governments to report lower case and death rates, the varying reporting methodologies (and changes) that skew cases/deaths data, as well as timing discrepancies, where some countries tend to represent current data that came from an older period.
+
+Other sources of bias include this analyst's tendency to provide quick analysis and visualizations due to deadlines and other work/time constraints.
+
+#### Session info 
+
+```{r info, echo=TRUE}
+sessionInfo()
+```
