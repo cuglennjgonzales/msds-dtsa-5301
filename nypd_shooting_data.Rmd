@@ -1,0 +1,405 @@
+---
+title: "NYPD Shooting Incident Data (Historic)"
+date: '2022-03-29'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(cowplot)
+```
+
+#### Introduction
+
+This is a quick analysis and visualization of New York shooting incident data, ranging from 2006 to 2020. We will look at a few ineresting features and how they relate to one another and to the prevalence of shooting incidents.
+
+#### Get data
+
+Reference: <https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD>
+
+```{r get_data}
+
+url = 'https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD'
+shootings = read_csv(url)
+```
+
+#### Summary and Inspection
+
+```{r summary_inspection, echo=TRUE}
+summary(shootings)
+head(shootings)
+```
+
+**Age**
+
+There are lots of `NA`s, and some features can be converted into factors. Let's look at the age-related columns:
+
+```{r get_age_columns}
+grep('AGE', names(shootings), value=TRUE, ignore.case=TRUE)
+```
+
+```{r inspect_age}
+summary(factor(shootings$PERP_AGE_GROUP))
+summary(factor(shootings$VIC_AGE_GROUP))
+```
+
+Victim ages look like they make sense but there are some weird values for the perpetrator ages: '1020', '224', and '940'. My guess is that '1020' should be '10-20', '224' should be '18-24', while '940' should be '25-44'. We'll set 'UNKNOWN's to `NA`s.
+
+**Sex**
+
+```{r inspect_sex}
+summary(factor(shootings$PERP_SEX))
+summary(factor(shootings$VIC_SEX))
+```
+
+We'll change the `U`s to `NA`s for the perpetrator sex.
+
+**Date and Time**
+
+```{r inspect_date_time}
+class(shootings$OCCUR_DATE)
+class(shootings$OCCUR_TIME)
+```
+
+We'll convert `OCCUR_DATE` into dates; `OCCUR_TIME` looks ok so we'll leave that as is.
+
+**Race**
+
+```{r inspect_race}
+summary(factor(shootings$PERP_RACE))
+summary(factor(shootings$VIC_RACE))
+```
+
+We'll convert 'UNKNOWN's into NAs as well.
+
+**Other Columns**
+
+```{r inspect_others}
+summary(factor(shootings$BORO))
+summary(factor(shootings$PRECINCT))
+summary(factor(shootings$JURISDICTION_CODE))
+summary(factor(shootings$LOCATION_DESC))
+```
+
+Most of the other columns look ok, and nothing jumps out on inspection. The `LOCATION_DESC` has a lot of `NA`s and maybe we can fold in some of these categories into wider and more appropriate values (e.g., Restaurant/Diner/Fast Food).
+
+The other colmuns deal with location and are numeric, and it looks like they're all in there:
+
+```{r inspect_coords}
+sum(is.na(shootings$X_COORD_CD))
+sum(is.na(shootings$Y_COORD_CD))
+sum(is.na(shootings$Latitude))
+sum(is.na(shootings$Longitude))
+sum(is.na(shootings$Lon_Lat))
+```
+
+#### Tidying up
+
+Let's now clean up a couple of the bad data values.
+
+First the age values:
+
+```{r fix_bad_age}
+shootings[
+  shootings$PERP_AGE_GROUP == '1020' & !is.na(shootings$PERP_AGE_GROUP), 
+]$PERP_AGE_GROUP <- '10-20'
+shootings[
+  shootings$PERP_AGE_GROUP == '224' & !is.na(shootings$PERP_AGE_GROUP), 
+]$PERP_AGE_GROUP <- '18-24'
+shootings[
+  shootings$PERP_AGE_GROUP == '940' & !is.na(shootings$PERP_AGE_GROUP), 
+]$PERP_AGE_GROUP <- '25-44'
+shootings[
+  shootings$PERP_AGE_GROUP == 'UNKNOWN' & !is.na(shootings$PERP_AGE_GROUP), 
+]$PERP_AGE_GROUP <- NA
+shootings[
+  shootings$VIC_AGE_GROUP == 'UNKNOWN' & !is.na(shootings$VIC_AGE_GROUP), 
+]$VIC_AGE_GROUP <- NA
+```
+
+Let's set NAs for sex:
+
+```{r set_u_sex_to_na}
+shootings[shootings$PERP_SEX == 'U' & !is.na(shootings$PERP_SEX), ]$PERP_SEX <- NA
+shootings[shootings$VIC_SEX == 'U' & !is.na(shootings$VIC_SEX), ]$VIC_SEX <- NA
+```
+
+Let's do the same for race:
+
+```{r set_u_race_to_na}
+shootings[shootings$PERP_RACE == 'UNKNOWN' & !is.na(shootings$PERP_RACE), ]$PERP_RACE <- NA
+shootings[shootings$VIC_RACE == 'UNKNOWN' & !is.na(shootings$VIC_RACE), ]$VIC_RACE <- NA
+```
+
+#### Transforming
+
+Here we'd like to make dates into date types, and categorical values into factors. At this point we want to factor all the `chr` columns except for `Lon_Lat`. Here we manually set the levels for the age groups, and let `as.factor` take care of the other features.
+
+```{r tidy_dates_cat, echo=TRUE}
+shootings <- shootings %>% 
+  mutate(OCCUR_DATE=mdy(OCCUR_DATE))
+shootings <- shootings %>% 
+  mutate(PERP_AGE_GROUP=factor(
+    PERP_AGE_GROUP, 
+    ordered=TRUE, 
+    levels=c('10-20', '<18', '18-24', '25-44', '45-64', '65+')
+  ))
+shootings <- shootings %>% 
+  mutate(VIC_AGE_GROUP=factor(
+    VIC_AGE_GROUP, 
+    ordered=TRUE, 
+    levels=c('10-20', '<18', '18-24', '25-44', '45-64', '65+')
+  ))
+shootings[1:18] <- mutate_if(shootings[1:18], is.character, as.factor)
+```
+
+#### Missing Data
+
+Our inspection shows that there are lots of `NA`s in many of the features. It would make sense to impute values for some of these features, like averaging for age groups. For some features, like sex or location description, and in some cases it might be more sensible to leave them as NAs and come up with an analysis that takes them into account as missing values.
+
+Here's the summary of our data so far:
+
+```{r summary_post_ops}
+summary(shootings)
+```
+
+```{r head_post_ops, echo=FALSE}
+head(shootings)
+```
+
+#### Visualization
+
+How does the number of shootings relate to area, race, and age?
+
+Let's group our data by race, age group, and area for both perpetrators and victims.
+
+```{r viz_group_by_age_race}
+by_boro_perprace_age = shootings %>% 
+  group_by(BORO, PERP_RACE, PERP_AGE_GROUP) %>% 
+  summarize(x = n()) %>% 
+  select(BORO, PERP_RACE, PERP_AGE_GROUP, x)
+by_boro_vicrace_age = shootings %>% 
+  group_by(BORO, VIC_RACE, VIC_AGE_GROUP) %>% 
+  summarize(x = n()) %>% 
+  select(BORO, VIC_RACE, VIC_AGE_GROUP, x)
+```
+
+Let's join the separate data together for easier handling.
+
+```{r viz_join}
+perp_vic <- left_join(
+    by_boro_perprace_age, 
+    by_boro_vicrace_age, 
+    by=c('BORO','PERP_RACE'='VIC_RACE','PERP_AGE_GROUP'='VIC_AGE_GROUP')
+  ) %>% 
+  rename(AGE_GROUP=PERP_AGE_GROUP) %>%
+  rename(RACE=PERP_RACE) %>%
+  rename(N_PERP_SHOOT=x.x) %>% 
+  rename(N_VIC_SHOOT=x.y)
+```
+
+Now let's visualize what we have.
+
+```{r viz_plot_1, fig.asp=1, fig.height=12, fig.width=10}
+theme_now <- theme(
+  plot.title=element_text(hjust=0.5, size=12),
+  legend.position='bottom', 
+  legend.box='vertical', 
+  legend.text=element_text(size=7), 
+  legend.title=element_text(size=10), 
+  axis.text.y=element_blank(), 
+  axis.title.y=element_blank(), 
+  axis.title.x=element_text(size=10)
+)
+guides_now <- guides(
+  color=guide_legend(order = 1), 
+  size=guide_legend(order = 2)
+)
+
+perp <- ggplot(perp_vic, aes(x=AGE_GROUP, size=N_PERP_SHOOT, color=RACE)) +
+  geom_point(aes(y=RACE)) + 
+  facet_wrap(vars(BORO)) + 
+  ggtitle('Perpetrators of Shootings by Race across Boroughs') + 
+  theme_minimal() +
+  scale_size(range=c(.1,18)) + 
+  theme_now + 
+  labs(color='Race', size='Shootings') + 
+  xlab('Age Group') + 
+  guides(color='none', size='none')
+
+vic <- ggplot(perp_vic, aes(x=AGE_GROUP, size=N_VIC_SHOOT, color=RACE)) +
+  geom_point(aes(y=RACE)) + 
+  facet_wrap(vars(BORO)) + 
+  ggtitle('Victims of Shootings by Race across Boroughs') + 
+  theme_minimal() +
+  scale_size(range=c(.1,18)) + 
+  theme_now + 
+  labs(color='Race', size='Shootings') + 
+  xlab('Age Group') + 
+  guides_now
+
+plot_grid(perp, vic, ncol=1, rel_heights=c(1,1.4), byrow=FALSE)
+```
+
+Using these plots makes it easy to see which areas have the most shootings and which ages and races are most involved in them. We can also easily compare the involvement of victims and perpetrators. One thing we can observe is that there are lots of missing data for perpetrators, which makes sense since it takes some time for them to be identified, and that information is not included here.
+
+#### Visualization
+
+What does the shooting data look like over time across the different areas?
+
+Let's group our data by area and quarter.
+
+```{r viz_by_boro_qrt, fig.width=10}
+by_boro_quarter <- shootings %>% 
+  mutate(YEAR_QUARTER=round_date(OCCUR_DATE, 'quarter')) %>%
+  group_by(BORO, YEAR_QUARTER) %>% 
+  summarize(Y=n()) %>% 
+  select(BORO, YEAR_QUARTER, Y)
+  
+ggplot(by_boro_quarter, aes(x=YEAR_QUARTER, y=Y, color=BORO)) + 
+  ggtitle('Shootings per Quarter across the Boroughs') + 
+  xlab('Year-Quarter') +
+  ylab('Shootings') +
+  geom_line(size=0.3) + 
+  geom_point() + 
+  theme_minimal() + 
+  theme_now + 
+  theme(
+    axis.text.y=element_text(), 
+    axis.title.y=element_text(angle=90)
+  ) + 
+  labs(color='Borough')
+```
+
+There is an interesting and seemingly significant seasonality for Bronx and Brooklyn -- the shooting incidents peak during summer!
+
+Additionally, a rough inspection draws the eye to the similarity of Bronx and Brooklyn, and Manhattan and Queens. Staten Island seems to stand apart.
+
+Also note the huge spike in fall of 2020 for Brooklyn.
+
+#### Visualization
+
+If we shift our attention to race, will we see something similar?
+
+```{r viz_by_race_qrt, fig.width=10}
+by_race_quarter <- shootings %>% 
+  mutate(YEAR_QUARTER=round_date(OCCUR_DATE, 'quarter')) %>%
+  group_by(PERP_RACE, YEAR_QUARTER) %>% 
+  summarize(Y=n()) %>% 
+  select(PERP_RACE, YEAR_QUARTER, Y)
+  
+ggplot(by_race_quarter, aes(x=YEAR_QUARTER, y=Y, color=PERP_RACE)) + 
+  ggtitle('Shootings per Quarter by Race (Perpetrator)') + 
+  xlab('Year-Quarter') +
+  ylab('Shootings') +
+  geom_line(size=0.3) + 
+  geom_point() + 
+  theme_minimal() + 
+  theme_now + 
+  theme(
+    axis.text.y=element_text(), 
+    axis.title.y=element_text(angle=90)
+  ) +
+  labs(color='Race (Perpetrator)')
+```
+
+We can see a similar seasonality here, but we have something else as well -- there is a multi-year upward and then downward (and upward again?) trend for missing race data. Notice the huge spike in the fall of 2020. The visualization for victim data is similar to the graph above.
+
+#### Model
+
+Let's try our hand at creating a model that will predict the incidents of shooting based on the features we have visualized.
+
+For clarity we're going to isolate the features for our model, then create the model using the quarter of the year and area (borough) since we have seen some significant trends related to these features on our visualizations.
+
+```{r modeling}
+X_df = data.frame(
+  BORO=by_boro_quarter$BORO, 
+  YEAR_QUARTER=by_boro_quarter$YEAR_QUARTER, 
+  MONTH=month(by_boro_quarter$YEAR_QUARTER), 
+  Y_train=by_boro_quarter$Y
+)
+model <- lm(Y_train ~ MONTH * BORO, data=X_df)
+```
+
+Now let's see how the model performs against the training data.
+
+Generate the predictions:
+
+```{r predict}
+X_df <- X_df %>% mutate(Y_pred = predict(model))
+```
+
+We're ready to do the visualization:
+
+```{r viz_model, fig.width=10}
+get_obs_geom_line <- function(boro, label) {
+  geom_line(
+    data=X_df %>% filter(BORO == boro), 
+    aes(x=YEAR_QUARTER, y=Y_train, color=paste(label, ' (Observed)', sep='')),
+    alpha=0.3,
+    size=1
+  )
+}
+get_pred_geom_line <- function(boro, label) {
+  geom_line(
+    data=X_df %>% filter(BORO == boro), 
+    aes(x=YEAR_QUARTER, y=Y_pred, color=paste(label, ' (Predicted)', sep='')),
+    alpha=0.8,
+    size=1
+  )
+}
+
+ggplot() + 
+  ggtitle('Observed vs Predicted Shooting Incidents') +
+  get_obs_geom_line('BRONX', 'Bronx') +
+  get_pred_geom_line('BRONX', 'Bronx') +
+  get_obs_geom_line('BROOKLYN', 'Brooklyn') +
+  get_pred_geom_line('BROOKLYN', 'Brooklyn') +
+  get_obs_geom_line('MANHATTAN', 'Manhattan') +
+  get_pred_geom_line('MANHATTAN', 'Manhattan') +
+  get_obs_geom_line('QUEENS', 'Queens') +
+  get_pred_geom_line('QUEENS', 'Queens') +
+  get_obs_geom_line('STATEN ISLAND', 'Staten Is.') +
+  get_pred_geom_line('STATEN ISLAND', 'Staten Is.') +
+  theme_minimal() +
+  theme(plot.title=element_text(hjust=0.5, size=12), legend.position='bottom') +
+  labs(color=element_blank(), x='Year-Quarter', y='Shootings')
+```
+
+It looks like the model is able to factor in seasonality as well as location into the predictions. We can see that the model was able to extract the relative magnitude in shooting incidents across the boroughs by displaying a kind of stratification, with Brooklyn having the most intense experience and Staten Island far below the others.
+
+#### Conclusion
+
+Based on our analyses and visualizations, we can conclude that: 
+
+1. There is a clear association between the prevalence of shooting incidents and racial membership, whether as a victim or as a perpetrator;
+1. There is a clear association between the prevalence of shooting incidents and the areas (borough) where the shootings occurred
+1. There is a clear association between the prevalence of shooting incidents and time of year (quarter/season)
+
+Our graphs, _"Victims/Perpetrators of Shootings by Race across Boroughs"_ visually demonstrate the differences in magnitudes of incidents in the different boroughs and among different races. The follow-up graph, _"Shootings per Quarter across the Boroughs"_ show seasonality and the similarities of some boroughs to one another relative to our dataset. The last graph, _"Shootings per Quarter by Race (Perpetrator)"_ visually show a trend over the years for all races.
+
+In addition, we were able to generate a model that takes into account the time of year and roughly predict the number of shooting incidents.
+
+Our conclusion does not make any statements about the reasons for the disparity in the prevalence of shooting incidents across areas, ages, and races, nor the intensity by which such reasons contribute to the magnitude of the data. This topic can definitely be explored in another data analysis.
+
+#### Bias Analysis
+
+Sources of bias may include the following:
+
+- Crime reporting attitudes in the population. Some crimes may be under-reported or mis-reported depending on perceptions on either side -- police may skew reporting towards certain demographics, while victims may skew towards more graphic and/or intense details. Victims are sometimes also reluctant to divulge all the information they have for various reasons
+- Volume of reporting. In cases of spikes, some data may not be reported until the following time periods, or may be lost, skewing the data in multiple directions
+- This data scientist is inclined to look at time-related data and how events can change based on that
+- Additionally, this data scientist tends towards visualizing data via groupings since that is easier and quicker for to do, and the more interesting groups seen were location, age, and race
+
+
+#### Session info 
+
+```{r info, echo=TRUE}
+sessionInfo()
+```
